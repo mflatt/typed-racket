@@ -11,8 +11,9 @@
 ;; ----------------
 ;;
 ;; A LambdaKeywords is a
-;;   (lambda-kws (Listof Keyword) (Listof Keyword) (Listof Keyword) (listof Boolean))
-(struct lambda-kws (mand opt opt-supplied pos-opt-supplied?))
+;;   (lambda-kws (Listof Keyword) (Listof Keyword) (Listof (cons Keyword Syntax))
+;;               Natural (listof (or/c #f Syntax)))
+(struct lambda-kws (mand opt opt-supplied pos-mand-count pos-opt-supplied))
 
 ;; interp.
 ;;   - the first list contains the mandatory keywords
@@ -271,25 +272,30 @@
                      (values mand-kws
                              (cons (syntax-e kw) opt-kws)
                              (if (immediate-default? default)
-                                 (cons (syntax-e kw) opt-kws-supplied)
+                                 (cons (cons (syntax-e kw) default) opt-kws-supplied)
                                  opt-kws-supplied))
                      (values (cons (syntax-e kw) mand-kws)
                              opt-kws
                              opt-kws-supplied))))
-             (define pos-opt-supplied?s
+             (define pos-mand-count
+               (for/sum ([kw (in-list kws)]
+                         [default (in-list defaults)]
+                         #:unless (or kw default))
+                 1))      
+             (define pos-opt-supplieds
                (for/list ([kw (in-list kws)]
                           [default (in-list defaults)]
                           #:when default
                           #:unless kw)
-                 (immediate-default? default)))
+                 (and (immediate-default? default) default)))
              (and (or (not (null? mand-kws))
                       (not (null? opt-kws)))
-                  (lambda-kws mand-kws opt-kws opt-kws-supplied pos-opt-supplied?s)))
+                  (lambda-kws mand-kws opt-kws opt-kws-supplied pos-mand-count pos-opt-supplieds)))
            #:attr opt-property
            (list (length (attribute mand))
                  (length (attribute opt))
                  (for/list ([default (in-list (attribute opt.default))])
-                   (immediate-default? default)))
+                   (and default (immediate-default? default) default)))
            #:attr erased
            (with-syntax ([((mand-form ...) ...) #'(mand.form ...)]
                          [((opt-form ...) ...) #'(opt.form ...)])

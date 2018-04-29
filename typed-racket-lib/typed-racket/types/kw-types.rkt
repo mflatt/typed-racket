@@ -7,14 +7,14 @@
          (base-env annotate-classes)
          racket/list racket/set racket/match
          racket/format racket/string
-         syntax/parse)
+         syntax/parse racket/unsafe/undefined
+         (for-template racket/base
+                       racket/unsafe/undefined))
 
 
 (define (convert keywords ; (listof Keyword?)
-                 kw-opts-supplied ; (listof Keyword?)
                  mandatory-arg-types ; (listof Type?)
                  optional-arg-types ; (listof Type?)
-                 pos-opts-supplied? ; (or/c (listof Boolean?) #f)
                  rng ; SomeValues?
                  maybe-rst ; (or/c #f Type? RestDots?)
                  split?) ; boolean?
@@ -37,15 +37,10 @@
           (for/list ([k (in-list sorted-kws)])
             (match k
               [(Keyword: _ t #t) t]
-              [(Keyword: kw t #f) (if (member kw kw-opts-supplied)
-                                      t
-                                      (Un t -Unsafe-Undefined))]))
+              [(Keyword: kw t #f) (Un t -Unsafe-Undefined)]))
           mandatory-arg-types
-          (for/list ([t (in-list optional-arg-types)]
-                     [supplied? (in-list pos-opts-supplied?)])
-            (if supplied?
-                t
-                (Un t -Unsafe-Undefined)))
+          (for/list ([t (in-list optional-arg-types)])
+            (Un t -Unsafe-Undefined))
           rst-type)))
 
       (list (-Arrow ts rng))]
@@ -60,17 +55,11 @@
             [(Keyword: _ t #t) (cons t pos)]
             ;; optional keyword arguments might be always supplied
             ;; in the expansion
-            [(Keyword: kw t #f)
-             (if (member kw kw-opts-supplied)
-                 (cons t pos) ; keyword always supplied by expansion, so no unsafe-undefined check
-                 (cons (Un t -Unsafe-Undefined) pos))])))
+            [(Keyword: kw t #f) (cons (Un t -Unsafe-Undefined) pos)])))
 
       (define updated-optional-arg-types
-        (for/list ([t (in-list optional-arg-types)]
-                   [supplied? (in-list pos-opts-supplied?)])
-          (if supplied?
-              t
-              (Un t -Unsafe-Undefined))))
+        (for/list ([t (in-list optional-arg-types)])
+          (Un t -Unsafe-Undefined)))
 
       (list (-Arrow (append kw-args mandatory-arg-types updated-optional-arg-types rst-type)
                     rng))])))
@@ -101,7 +90,8 @@
 ;; keywords list. This allows the typechecker to check some branches of the
 ;; type that match the actual kws. Add extra actual keywords with Bottom type.
 (define (handle-extra-or-missing-kws kws actual-kws)
-  (match-define (lambda-kws actual-mands actual-opts actual-opts-supplied actual-pos-opts-supplied?)
+  (match-define (lambda-kws actual-mands actual-opts actual-opts-supplied
+                            actual-pos-mand-count actual-pos-opts-supplied)
     actual-kws)
   (define expected-kws (map Keyword-kw kws))
   (define missing-removed
@@ -170,16 +160,9 @@
           (define kws* (if actual-kws
                            (handle-extra-or-missing-kws kws actual-kws)
                            kws))
-          (define kw-opts-supplied (if actual-kws
-                                       (lambda-kws-opt-supplied actual-kws)
-                                       '()))
           (convert kws*
-                   kw-opts-supplied
                    (take dom mand-arg-count)
                    (drop dom mand-arg-count)
-                   (if actual-kws
-                       (lambda-kws-pos-opt-supplied? actual-kws)
-                       (make-list (- (length dom) mand-arg-count) #f))
                    rng
                    rst
                    split?)]))))
@@ -258,7 +241,8 @@
 ;; the type that we've given. Allows for better error messages than just
 ;; relying on tc-expr. Return #f if the function shouldn't be checked.
 (define (check-kw-arity kw-prop f-type)
-  (match-define (lambda-kws actual-mands actual-opts actual-opts-supplied actual-pos-opts-supplied?)
+  (match-define (lambda-kws actual-mands actual-opts actual-opts-supplied
+                            actual-pos-mand-count actual-pos-opts-supplied)
     kw-prop)
   (define arrs
     (match f-type
@@ -314,31 +298,28 @@
                  (cons (make-Keyword (car keywords) (car kw-args) #f)
                        kw-types))])))
 
-(define ((opt-convert-arr required-pos optional-pos optional-supplied?) arr)
+(define ((opt-convert-arr required-pos optional-pos) arr)
   (match arr
     [(Arrow: args #f '() result)
      (define num-args (length args))
      (and (>= num-args required-pos)
           (<= num-args (+ required-pos optional-pos))
           (let* ([required-args (take args required-pos)]
-                 [opt-args (for/list ([arg (in-list (drop args required-pos))]
-                                      [supplied? (in-list optional-supplied?)])
-                             (if supplied?
-                                 arg
-                                 (Un -Unsafe-Undefined arg)))]
+                 [opt-args (for/list ([arg (in-list (drop args required-pos))])
+                             (Un -Unsafe-Undefined arg))]
                  [missing-opt-args (- (+ required-pos optional-pos) num-args)]
-                 [missing-args (make-list missing-opt-args (Un))])
+                 [missing-args (make-list missing-opt-args -Unsafe-Undefined)])
             (-Arrow (append required-args
                             opt-args
                             missing-args)
                     result)))]
     [_ #f]))
 
-(define (opt-convert ft required-pos optional-pos optional-supplied?)
+(define (opt-convert ft required-pos optional-pos)
   (let loop ([ft ft])
     (match ft
       [(Fun: arrs)
-       (let ([arrs (map (opt-convert-arr required-pos optional-pos optional-supplied?) arrs)])
+       (let ([arrs (map (opt-convert-arr required-pos optional-pos) arrs)])
          (and (andmap values arrs)
               (make-Fun arrs)))]
       [(Poly-names: names f)
@@ -400,5 +381,85 @@
 (define (partition-kws kws)
   (partition (match-lambda [(Keyword: _ _ mand?) mand?]) kws))
 
+;; kw-add-supplied : Syntax LambdaKeywords -> Syntax
+(define (kw-add-supplied form kw-prop)
+  (match-define (lambda-kws mands opts opts-supplied
+                            pos-mand-count pos-opts-supplied)
+    kw-prop)
+  (add-supplied form (append mands opts) opts-supplied pos-mand-count pos-opts-supplied))
+
+;; opt-add-supplied : Syntax Natural (Listof (U Syntax #f))  -> Syntax
+(define (opt-add-supplied form mand-count opt-supplieds)
+  (add-supplied form '() '() mand-count opt-supplieds))
+
+;; For optional arguments where the default is an expression simple
+;; enough to be always supplied by a caller, convert the function
+;; `form` to expect either a value or `undefined`, like the more
+;; general case. That way, the default-value expression gets checked
+;; independent from a call.
+(define (add-supplied form keywords kw-opts-supplied pos-man-count pos-opt-supplieds)
+  (cond
+    [(and (empty? kw-opts-supplied)
+          (for/and ([supplied (in-list pos-opt-supplieds)]) (not supplied)))
+     ;; No conversion needed
+     form]
+    [else
+     (define sorted-kws (sort keywords keyword<?))
+     (syntax-parse form
+       [(lam:id formals body:expr)
+        #:when (free-identifier=? #'lam #'#%plain-lambda)
+        (define (rebuild body lv arg rhs maybe-opt-expr next-body)
+          (datum->syntax
+           body
+           `(,lv ([(,arg) ,(if maybe-opt-expr
+                               `(,#'if ,#`(#%plain-app eq? unsafe-undefined #,rhs)
+                                       ,(quote-datum maybe-opt-expr)
+                                       ,rhs)
+                               rhs)])
+                 ,next-body)
+           body
+           body))
+        (define (quote-datum stx)
+          (let ([e (syntax-e stx)])
+            (if (or (pair? e) (symbol? e))
+                stx
+                #`(quote #,stx))))
+        ;; We expect a `let` sequence that has by-position first, then
+        ;; keyword arguments
+        (define new-body
+          (let loop ([body #'body]
+                     [pos-man-count pos-man-count]
+                     [pos-opt-supplieds pos-opt-supplieds]
+                     [sorted-kws sorted-kws])
+            (cond
+              [(and (null? sorted-kws) (null? pos-opt-supplieds))
+               body]
+              [else
+               (syntax-parse body
+                 [(lv ([(arg:id) rhs:expr]) next-body:expr)
+                  #:when (free-identifier=? #'lv #'let-values)
+                  (cond
+                    [(and (zero? pos-man-count)
+                          (empty? pos-opt-supplieds))
+                     (define a (assq (car sorted-kws) kw-opts-supplied))
+                     (rebuild body #'lv #'arg #'rhs (and a (cdr a))
+                              (loop #'next-body 0 '() (cdr sorted-kws)))]
+                    [(positive? pos-man-count)
+                     (rebuild body #'lv #'arg #'rhs #f
+                              (loop #'next-body (sub1 pos-man-count) pos-opt-supplieds sorted-kws))]
+                    [else
+                     (rebuild body #'lv #'arg #'rhs (car pos-opt-supplieds)
+                              (loop #'next-body 0 (cdr pos-opt-supplieds) sorted-kws))])]
+                 [_
+                  (int-err "expected an argument let binding")])])))
+        (datum->syntax
+         form
+         `(,#'lam ,#'formals ,new-body)
+         form
+         form)]
+       [_
+        (int-err "expected an optional-argument core function")])]))
+
 (provide kw-convert kw-unconvert opt-convert opt-unconvert partition-kws
-         check-kw-arity)
+         check-kw-arity
+         kw-add-supplied opt-add-supplied)

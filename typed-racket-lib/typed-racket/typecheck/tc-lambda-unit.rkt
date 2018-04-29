@@ -24,9 +24,9 @@
 
 (define-syntax-class cl-rhs
   #:literal-sets (kernel-literals)
-  #:attributes (i cond)
-  [pattern i:id #:attr cond #f]
-  [pattern (if cond:expr e:expr i:id)])
+  #:attributes (i)
+  [pattern i:id]
+  [pattern (if _:expr _:expr i:id)])
 
 (define-syntax-class rebuild-let*
   #:literal-sets (kernel-literals)

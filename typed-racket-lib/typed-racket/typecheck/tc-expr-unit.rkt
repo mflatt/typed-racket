@@ -260,22 +260,28 @@
          [(tc-result1: (and f (or (? Fun?) (Poly-unsafe: _ (? Fun?)))))
           (define actual-kws (attribute kw.value))
           (check-kw-arity actual-kws f)
-          (tc-expr/check/type #'fun (kw-convert f actual-kws #:split #t))
+          (tc-expr/check/type (kw-add-supplied #'fun actual-kws)
+                              (kw-convert f actual-kws #:split #t))
           (ret f -true-propset)]
          [_ (tc-expr/check form #f)])]
       ;; opt function def
       [(~and (let-values ([(f) fun]) . body) opt:opt-lambda^)
        #:when expected
-       (define conv-type
+       (define-values (conv-type conv-form)
          (match expected
            [(tc-result1: fun-type)
-            (match-define (list required-pos optional-pos optional-supplied?)
-                          (attribute opt.value))
-            (opt-convert fun-type required-pos optional-pos optional-supplied?)]
-           [_ #f]))
+            (match-define (list required-pos optional-pos optional-supplied)
+              (attribute opt.value))
+            (values
+             (opt-convert fun-type required-pos optional-pos)
+             ;; If `optional-supplied` contains any expressions, then they
+             ;; aren't currently in `fun`; adjust `fun` to add them as if they
+             ;; weren't always supplied by a caller
+             (opt-add-supplied #'fun required-pos optional-supplied))]
+           [_ (values #f form)]))
        (if conv-type
-           (begin (tc-expr/check/type #'fun conv-type) expected)
-           (tc-expr/check form #f))]
+           (begin (tc-expr/check/type conv-form conv-type) expected)
+           (tc-expr/check conv-form #f))]
       [(~and _:kw-lambda^
          (let-values ([(f) fun])
            (let-values _
